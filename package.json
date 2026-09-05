@@ -1,0 +1,17 @@
+{
+  "name": "haraka-smtp-fuzzer",
+  "private": false,
+  "version": "0.1.0",
+  "description": "Targeted SMTP fuzzer for Haraka — runs probes against a live server and correlates with maillog",
+  "bin": {
+    "haraka-fuzz": "./fuzz.js"
+  },
+  "scripts": {
+    "fuzz": "node fuzz.js",
+    "fuzz:local": "node local/fuzz.js",
+    "test": "node --test 'test/*.test.js' 'local/test/*.test.js'"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

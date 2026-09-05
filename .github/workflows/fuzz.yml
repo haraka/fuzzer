@@ -1,0 +1,148 @@
+name: fuzz
+
+# Nightly property/mutation fuzzing of Haraka and its parsing libraries.
+# Findings are deduplicated by signature; a run fails only on a signature that is
+# not in findings/baseline.json, so known-and-triaged issues do not re-alert.
+# Every run prints its seed and uploads the findings directory, so anything it
+# reports can be replayed locally with the same --seed.
+
+on:
+  schedule:
+    - cron: '23 4 * * *' # daily, off the hour
+  workflow_dispatch:
+    inputs:
+      iters:
+        description: mutated inputs per local target
+        default: '5000'
+      duration:
+        description: seconds to run the network fuzzer (0 = one pass)
+        default: '600'
+      seed:
+        description: PRNG seed (blank = random)
+        default: ''
+
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  ITERS: ${{ inputs.iters || '5000' }}
+  DURATION: ${{ inputs.duration || '600' }}
+
+jobs:
+  local:
+    name: library targets (worker-isolated)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with: { path: fuzzer }
+      # local/targets resolve siblings as ../../../<repo>, so check them out beside the fuzzer
+      - uses: actions/checkout@v6
+        with: { repository: haraka/Haraka, path: Haraka }
+      - uses: actions/checkout@v6
+        with: { repository: haraka/message-stream, path: message-stream }
+      - uses: actions/checkout@v6
+        with: { repository: haraka/haraka-config, path: haraka-config }
+      - uses: actions/checkout@v6
+        with: { repository: haraka/email-message, path: email-message }
+      - uses: actions/checkout@v6
+        with: { repository: haraka/email-address, path: email-address }
+      - uses: actions/checkout@v6
+        with: { repository: haraka/haraka-tld, path: tld }
+      - uses: actions/checkout@v6
+        with: { repository: haraka/haraka-net-utils, path: net-utils }
+      - uses: actions/setup-node@v6
+        with: { node-version: 24 }
+      - name: install targets
+        run: for d in Haraka message-stream haraka-config email-message email-address tld net-utils; do (cd "$d" && npm ci --no-audit --no-fund); done
+      - name: seed
+        id: seed
+        run: echo "seed=${{ inputs.seed || github.run_id }}" >> "$GITHUB_OUTPUT"
+      - name: fuzz
+        working-directory: fuzzer
+        run: |
+          node local/fuzz.js --iters "$ITERS" --seed "${{ steps.seed.outputs.seed }}" --out ./findings-local --quiet
+      - name: fail on new signatures
+        working-directory: fuzzer
+        run: |
+          node -e '
+            const fs = require("node:fs")
+            const idx = fs.existsSync("findings-local/index.json") ? JSON.parse(fs.readFileSync("findings-local/index.json","utf8")) : {}
+            const base = fs.existsSync("findings/baseline.json") ? JSON.parse(fs.readFileSync("findings/baseline.json","utf8")) : {}
+            const fresh = Object.values(idx).filter((e) => !base[e.key])
+            for (const e of fresh) console.log(`NEW  ${e.key}  ${e.kind}  ${e.signature}`)
+            console.log(`seed ${process.env.SEED}: ${Object.keys(idx).length} finding(s), ${fresh.length} new`)
+            if (fresh.length) process.exit(1)
+          '
+        env: { SEED: '${{ steps.seed.outputs.seed }}' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: findings-local-${{ github.run_id }}
+          path: fuzzer/findings-local
+          if-no-files-found: ignore
+
+  network:
+    name: live server (protocol, auth, tls, body)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with: { path: fuzzer }
+      - uses: actions/checkout@v6
+        with: { repository: haraka/Haraka, path: Haraka }
+      - uses: actions/setup-node@v6
+        with: { node-version: 24 }
+      - name: install Haraka
+        working-directory: Haraka
+        run: npm ci --no-audit --no-fund
+      - name: start Haraka on loopback with a discard queue
+        working-directory: Haraka
+        run: |
+          # Install the shipped default config (what real deployments boot from);
+          # test/config is for unit tests and is missing sections a server needs.
+          node bin/haraka -i /tmp/fuzzroot
+          cd /tmp/fuzzroot/config
+          sed -i 's/^;*listen=.*/listen=127.0.0.1:2500/' smtp.ini; grep -q '^listen=' smtp.ini || echo 'listen=127.0.0.1:2500' >> smtp.ini
+          # the probes' envelope is RCPT TO:<c@d>; without 'd' every recipient is
+          # refused and no body/receive-side probe ever reaches DATA
+          printf 'haraka.local\nexample.test\nd\n' > host_list
+          echo haraka.local > me
+          # the surfaces the probes target, plus a queue that needs no backend
+          printf 'auth/flat_file\nrcpt_to.in_host_list\nqueue/discard\n' > plugins
+          # WARN (the default) hides the 451/503 refusals; PROTOCOL also records
+          # every S: reply, so 235/250/354 evidence is in the artifact
+          echo PROTOCOL > loglevel
+          cd /tmp/fuzzroot && nohup node "$GITHUB_WORKSPACE/Haraka/bin/haraka" -c /tmp/fuzzroot > /tmp/maillog 2>&1 &
+          for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/2500) 2>/dev/null && break; sleep 1; done
+          head -5 /tmp/maillog
+      - name: seed
+        id: seed
+        run: echo "seed=${{ inputs.seed || github.run_id }}" >> "$GITHUB_OUTPUT"
+      - name: fuzz
+        working-directory: fuzzer
+        run: node fuzz.js --host 127.0.0.1 --port 2500 --maillog /tmp/maillog --out ./findings --duration "$DURATION" --seed "${{ steps.seed.outputs.seed }}" --quiet
+      - name: fail on new signatures
+        working-directory: fuzzer
+        run: |
+          node -e '
+            const fs = require("node:fs")
+            const idx = fs.existsSync("findings/index.json") ? JSON.parse(fs.readFileSync("findings/index.json","utf8")) : {}
+            const base = fs.existsSync("findings/baseline.json") ? JSON.parse(fs.readFileSync("findings/baseline.json","utf8")) : {}
+            const fresh = Object.values(idx).filter((e) => !base[e.key])
+            for (const e of fresh) console.log(`NEW  ${e.key}  ${e.kind}  ${e.signature}`)
+            console.log(`${Object.keys(idx).length} finding(s), ${fresh.length} new`)
+            if (fresh.length) process.exit(1)
+          '
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: findings-network-${{ github.run_id }}
+          path: |
+            fuzzer/findings
+            /tmp/maillog
+          if-no-files-found: ignore
