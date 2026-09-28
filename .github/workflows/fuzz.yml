@@ -58,7 +58,8 @@ jobs:
       - uses: actions/setup-node@v6
         with: { node-version: 24 }
       - name: install targets
-        run: for d in Haraka message-stream haraka-config email-message email-address tld net-utils; do (cd "$d" && npm ci --no-audit --no-fund); done
+        # these are libraries without a committed package-lock.json, so `npm ci` can't be used
+        run: for d in Haraka message-stream haraka-config email-message email-address tld net-utils; do (cd "$d" && npm install --no-audit --no-fund); done
       - name: seed
         id: seed
         run: echo "seed=${{ inputs.seed || github.run_id }}" >> "$GITHUB_OUTPUT"
@@ -99,7 +100,8 @@ jobs:
         with: { node-version: 24 }
       - name: install Haraka
         working-directory: Haraka
-        run: npm ci --no-audit --no-fund
+        # Haraka doesn't commit a package-lock.json, so `npm ci` can't be used
+        run: npm install --no-audit --no-fund
       - name: start Haraka on loopback with a discard queue
         working-directory: Haraka
         run: |
