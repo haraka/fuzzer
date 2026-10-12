@@ -95,6 +95,19 @@ function signatureFor(target, res) {
   return null
 }
 
+const SLOW_CONFIRM_RUNS = 3
+
+// A single over-threshold timing is often a GC pause or a noisy shared runner,
+// so only report SLOW when most re-runs of the same input are also slow.
+async function staysSlow(harness, input) {
+  let slowRuns = 0
+  for (let i = 0; i < SLOW_CONFIRM_RUNS; i++) {
+    const r = await harness.call(input)
+    if (r.durationNs / 1e6 > slowMs) slowRuns++
+  }
+  return slowRuns > SLOW_CONFIRM_RUNS / 2
+}
+
 const MIN_INPUT_MAX = 4096 // skip minimize for inputs larger than this
 const MIN_BUDGET_MS = 10_000 // wall-clock budget per finding
 
@@ -141,6 +154,7 @@ async function fuzzTarget(name, store, rng) {
     const sig = signatureFor(target, res)
     if (!sig) return
     if (store.has(sig)) return
+    if (sig === `${target.name}:SLOW` && !(await staysSlow(harness, input))) return
     newFindings++
     log(`[${name}] FINDING ${sig.slice(0, 140)} (${source}, ${input.length}B)`)
     let minimized = null
