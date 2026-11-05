@@ -92,6 +92,9 @@ function checkFormatted(parseHeader, item, opts) {
 
 module.exports = {
   name: 'address-header',
+  // assertLinear parses ~256KB per option set and catches superlinear parses itself: on a slow runner that alone
+  // passes --slow. Under the 1000ms hang timeout
+  slowMs: 800,
   seeds: [
     ...corpusSeeds(),
     'Friends: a@example.com, "x y" <b@example.com>;',
